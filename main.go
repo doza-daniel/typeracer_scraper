@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"html"
 	"io/ioutil"
@@ -27,7 +28,10 @@ var extractID = regexp.MustCompile(`/text\?id=([0-9]+)`)
 var txtInfo = regexp.MustCompile(`fullTextStr">(.*?)</div>(?s).*>(.*)</a>(?s).*/>\((.*)\)(?s).*by (.*?)\n`)
 
 func main() {
-	db, err := NewTextsDB("asdf.db")
+	dbPath := flag.String("db", "texts.db", "")
+	flag.Parse()
+
+	db, err := NewTextsDB(*dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -43,18 +47,15 @@ func main() {
 
 	ids := fetchIDsFromHTML(html)
 
-	for i, id := range ids {
+	for _, id := range ids {
 		msg := fmt.Sprintf("text %d", id)
 		if err := fetchTextInfo(db, id); err != nil {
 			msg = fmt.Sprintf("%s: error: %v", msg, err)
 		} else {
-			msg = fmt.Sprintf("%s: done")
+			msg = fmt.Sprintf("%s: done", msg)
 		}
 
 		log.Println(msg)
-		if i == 10 {
-			break
-		}
 	}
 }
 
@@ -143,7 +144,8 @@ func fetchTextInfo(db *TextsDB, id int64) error {
 	}
 
 	if err := db.Insert(
-		id, match[fullText],
+		id,
+		html.UnescapeString(match[fullText]),
 		html.UnescapeString(match[sourceType]),
 		html.UnescapeString(match[author]),
 		html.UnescapeString(match[source]),
