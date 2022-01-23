@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"html"
@@ -10,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -20,9 +20,6 @@ const (
 	sourceType
 	author
 )
-
-// ErrNoMatchOnLine ...
-var ErrNoMatchOnLine = errors.New("no match found on line")
 
 var extractID = regexp.MustCompile(`/text\?id=([0-9]+)`)
 var txtInfo = regexp.MustCompile(`fullTextStr">(.*?)</div>(?s).*>(.*)</a>(?s).*/>\((.*)\)(?s).*by (.*?)\n`)
@@ -59,10 +56,10 @@ func main() {
 	}
 }
 
-func fetchIDsFromHTML(html string) []int64 {
+func fetchIDsFromHTML(htmlStr string) []int64 {
 	ids := make([]int64, 0)
 
-	matches := extractID.FindAllStringSubmatch(html, -1)
+	matches := extractID.FindAllStringSubmatch(htmlStr, -1)
 	for _, match := range matches {
 		if len(match) < 2 {
 			continue
@@ -101,20 +98,6 @@ func fetchTextsHTML() (string, error) {
 	return string(htmlBytes), nil
 }
 
-func fetchTextID(line string) (int64, error) {
-	match := extractID.FindStringSubmatch(line)
-	if match != nil {
-		return 0, ErrNoMatchOnLine
-	}
-
-	id, err := strconv.ParseInt(match[1], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse id from string: %v: %w", match[1], err)
-	}
-
-	return id, nil
-}
-
 func fetchTextInfo(db *TextsDB, id int64) error {
 	pitURL := fmt.Sprintf("https://data.typeracer.com/pit/text_info?id=%d", id)
 
@@ -123,22 +106,22 @@ func fetchTextInfo(db *TextsDB, id int64) error {
 		return fmt.Errorf("failed to create http request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doWithRetriesReq(req)
 	if err != nil {
-		return fmt.Errorf("http request failed: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
 
 	htmlBytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to parse text info: %w", err)
 	}
 
-	match := txtInfo.FindStringSubmatch(string(htmlBytes))
+	return fetchTextInfoFromHTML(db, id, string(htmlBytes))
+}
+
+func fetchTextInfoFromHTML(db *TextsDB, id int64, htmlStr string) error {
+	match := txtInfo.FindStringSubmatch(htmlStr)
 	if match == nil {
 		return fmt.Errorf("failed to match text info")
 	}
@@ -154,4 +137,36 @@ func fetchTextInfo(db *TextsDB, id int64) error {
 	}
 
 	return nil
+
+}
+
+func doWithRetriesReq(req *http.Request) (*http.Response, error) {
+	var initialBackoff time.Duration = time.Second * 5
+	var maxBackoff time.Duration = time.Second * 30
+	var backoff time.Duration = initialBackoff
+
+	for {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("http request failed: %w", err)
+		}
+
+		if resp.StatusCode == 200 {
+			return resp, nil
+		}
+
+		resp.Body.Close()
+
+		if resp.StatusCode != 429 {
+			return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		log.Printf("status code 429: sleeping %v", backoff)
+		time.Sleep(backoff)
+
+		backoff += initialBackoff
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
 }
